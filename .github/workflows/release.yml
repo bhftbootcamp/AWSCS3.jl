@@ -1,0 +1,267 @@
+name: Release - Build and Publish Assets
+
+on:
+  push:
+    branches: [master]
+
+concurrency:
+  group: release-${{ github.ref }}
+  cancel-in-progress: false
+
+permissions:
+  contents: read
+
+jobs:
+  prepare_release:
+    name: Prepare Release Trigger
+    runs-on: ubuntu-24.04
+    permissions:
+      contents: write
+    outputs:
+      version: ${{ steps.meta.outputs.version }}
+      tag: ${{ steps.meta.outputs.tag }}
+      release_enabled: ${{ steps.meta.outputs.release_enabled }}
+    steps:
+      - uses: actions/checkout@v6
+        with:
+          fetch-depth: 0
+
+      - uses: julia-actions/setup-julia@v3
+        with:
+          version: '1.10'
+
+      - name: Determine Version and Release Tag
+        id: meta
+        shell: bash
+        run: |
+          set -euo pipefail
+
+          version="$(julia -e 'using TOML; print(TOML.parsefile("Project.toml")["version"])')"
+          if [[ ! "$version" =~ ^[0-9]+\.[0-9]+\.[0-9]+$ ]]; then
+            echo "ERROR: Project.toml version must be numeric semver (MAJOR.MINOR.PATCH), got: $version"
+            exit 1
+          fi
+          tag="v$version"
+          if [[ ! "$tag" =~ ^v[0-9]+\.[0-9]+\.[0-9]+$ ]]; then
+            echo "ERROR: invalid generated tag format: $tag"
+            exit 1
+          fi
+
+          git fetch --force --tags origin
+          git fetch --no-tags origin +refs/heads/master:refs/remotes/origin/master
+
+          latest_tag="$(
+            git tag -l 'v*.*.*' \
+            | grep -E '^v[0-9]+\.[0-9]+\.[0-9]+$' \
+            | sort -V \
+            | tail -n 1 || true
+          )"
+
+          if [[ -n "$latest_tag" ]]; then
+            top="$(printf '%s\n%s\n' "$latest_tag" "$tag" | sort -V | tail -n 1)"
+            if [[ "$top" != "$tag" ]]; then
+              echo "ERROR: Project.toml version tag ($tag) is lower than latest existing tag ($latest_tag)"
+              exit 1
+            fi
+          fi
+
+          if [[ "${GITHUB_REF_NAME}" != "master" ]]; then
+            echo "ERROR: unsupported ref for release workflow: ${GITHUB_REF_NAME}"
+            exit 1
+          fi
+
+          release_enabled="false"
+          tag_action="none"
+          if git rev-parse -q --verify "refs/tags/$tag" >/dev/null; then
+            tag_commit="$(git rev-list -n 1 "$tag")"
+            if [[ "$tag_commit" == "$GITHUB_SHA" ]]; then
+              echo "Tag $tag already exists on current commit; skipping release."
+              tag_action="tag_already_exists_current_commit"
+            else
+              echo "ERROR: tag $tag already exists on different commit ($tag_commit)"
+              echo "current_commit=$GITHUB_SHA"
+              exit 1
+            fi
+          else
+            git tag "$tag" "$GITHUB_SHA"
+            git push origin "$tag"
+            echo "Created and pushed release tag: $tag"
+            tag_action="tag_created"
+            release_enabled="true"
+          fi
+
+          echo "version=$version" >> "$GITHUB_OUTPUT"
+          echo "tag=$tag" >> "$GITHUB_OUTPUT"
+          echo "release_enabled=$release_enabled" >> "$GITHUB_OUTPUT"
+          {
+            echo "### Prepare Release Summary"
+            echo ""
+            echo "- Ref type: ${GITHUB_REF_TYPE}"
+            echo "- Ref name: ${GITHUB_REF_NAME}"
+            echo "- Project version: ${version}"
+            echo "- Target tag: ${tag}"
+            echo "- Tag action: ${tag_action}"
+            echo "- Release enabled (current run): ${release_enabled}"
+            echo "- Note: release runs in this master pipeline when a new tag is created"
+          } >> "$GITHUB_STEP_SUMMARY"
+
+  config:
+    name: Load Workflow Config
+    needs: prepare_release
+    if: ${{ needs.prepare_release.outputs.release_enabled == 'true' }}
+    runs-on: ubuntu-24.04
+    outputs:
+      build_matrix: ${{ steps.config.outputs.build_matrix }}
+    steps:
+      - uses: actions/checkout@v6
+      - name: Cache pip
+        uses: actions/cache@v5
+        with:
+          path: ~/.cache/pip
+          key: ${{ runner.os }}-pip-pyyaml-v1
+      - name: Install PyYAML
+        shell: bash
+        run: python3 -m pip install --disable-pip-version-check --quiet pyyaml
+      - id: config
+        shell: bash
+        run: |
+          python3 - <<'PY'
+          import json
+          import os
+          from pathlib import Path
+          import yaml
+
+          cfg = yaml.safe_load(Path(".github/workflow-config.yml").read_text(encoding="utf-8"))
+          out = Path(os.environ["GITHUB_OUTPUT"])
+          with out.open("a", encoding="utf-8") as f:
+              f.write(f"build_matrix={json.dumps(cfg['build_matrix'])}\n")
+          PY
+
+  build_test_package:
+    name: Build, Test, and Package
+    if: ${{ needs.prepare_release.outputs.release_enabled == 'true' }}
+    needs: [prepare_release, config]
+    runs-on: ${{ matrix.platform.os }}
+    timeout-minutes: 60
+    permissions:
+      actions: write
+      contents: read
+    strategy:
+      fail-fast: false
+      matrix: ${{ fromJson(needs.config.outputs.build_matrix) }}
+    steps:
+      - uses: actions/checkout@v6
+      - name: Build, Test, and Package
+        uses: ./.github/actions/build-test
+        with:
+          julia-version: ${{ matrix.julia }}
+          julia-arch: ${{ matrix.platform.arch }}
+          lib-ext: ${{ matrix.platform.lib_ext }}
+          run-precompile: 'false'
+          run-tests: 'true'
+          package-asset: 'true'
+          asset-name: ${{ matrix.platform.platform }}-julia${{ matrix.julia }}
+          artifact-name: ${{ matrix.platform.platform }}-julia${{ matrix.julia }}
+
+  publish:
+    name: Publish GitHub Release
+    if: ${{ needs.prepare_release.outputs.release_enabled == 'true' }}
+    needs: [prepare_release, build_test_package]
+    runs-on: ubuntu-24.04
+    permissions:
+      contents: write
+    steps:
+      - uses: actions/download-artifact@v8
+        with:
+          path: artifacts
+
+      - name: Prepare Release Files
+        run: |
+          set -euo pipefail
+          mkdir -p release
+          mv artifacts/*/*.tar.gz release/
+          ls -lh release/
+
+      - uses: softprops/action-gh-release@v3
+        with:
+          tag_name: ${{ needs.prepare_release.outputs.tag }}
+          files: release/*.tar.gz
+          generate_release_notes: true
+
+  register:
+    name: Update Registry
+    if: ${{ needs.prepare_release.outputs.release_enabled == 'true' }}
+    needs: [prepare_release, publish]
+    runs-on: ubuntu-24.04
+    timeout-minutes: 30
+    permissions:
+      contents: read
+      actions: write
+    defaults:
+      run:
+        shell: bash
+    steps:
+      - uses: actions/checkout@v6
+        with:
+          fetch-depth: 0
+          ssh-key: ${{ secrets.SSH_PRIVATE_KEY }}
+
+      - uses: julia-actions/setup-julia@v3
+        with:
+          version: '1.10'
+
+      - uses: julia-actions/cache@v3
+
+      - name: Add Registry
+        uses: julia-actions/add-julia-registry@v2
+        with:
+          key: ${{ secrets.SSH_PRIVATE_KEY }}
+          registry: bhftbootcamp/Green
+
+      - name: Configure Git
+        run: |
+          git config --global user.name "github-actions[bot]"
+          git config --global user.email "github-actions[bot]@users.noreply.github.com"
+
+      - name: Install LocalRegistry
+        run: julia -e 'using Pkg; Pkg.add("LocalRegistry")'
+
+      - name: Dev Current Package
+        run: julia -e 'using Pkg; Pkg.develop(PackageSpec(path=pwd()))'
+
+      - name: Determine Package Name and Version
+        id: meta
+        run: |
+          set -euo pipefail
+          name="$(julia -e 'using TOML; print(TOML.parsefile("Project.toml")["name"])')"
+          version="$(julia -e 'using TOML; print(TOML.parsefile("Project.toml")["version"])')"
+
+          if [[ ! "$version" =~ ^[0-9]+\.[0-9]+\.[0-9]+$ ]]; then
+            echo "ERROR: Project.toml version must be numeric semver (MAJOR.MINOR.PATCH), got: $version"
+            exit 1
+          fi
+
+          tag="v$version"
+          if [[ "$tag" != "${{ needs.prepare_release.outputs.tag }}" ]]; then
+            echo "ERROR: release tag (${{ needs.prepare_release.outputs.tag }}) does not match Project.toml version ($tag)"
+            exit 1
+          fi
+
+          echo "name=$name" >> "$GITHUB_OUTPUT"
+          echo "version=$version" >> "$GITHUB_OUTPUT"
+          echo "tag=$tag" >> "$GITHUB_OUTPUT"
+
+      - name: Update Registry Entry
+        env:
+          PKG_NAME: ${{ steps.meta.outputs.name }}
+        run: |
+          set -euo pipefail
+          julia -e '
+            using LocalRegistry
+            LocalRegistry.register(
+              ENV["PKG_NAME"];
+              repo = "https://github.com/${{ github.repository }}.git",
+              registry = "git@github.com:bhftbootcamp/Green.git",
+              ignore_reregistration = true,
+            )
+          '

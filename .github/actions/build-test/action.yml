@@ -1,0 +1,125 @@
+name: Build native wrapper and test
+description: Build C shim wrapper, stage libs3_jl_shim, optionally run precompile/tests and package an asset.
+
+inputs:
+  julia-version:
+    description: 'Julia version'
+    required: true
+  julia-arch:
+    description: 'Julia architecture (x64|x86|aarch64|default)'
+    required: false
+    default: 'default'
+  project-dir:
+    description: 'Path to Julia project (directory with Project.toml)'
+    required: false
+    default: '.'
+  build-script:
+    description: 'Path to build script'
+    required: false
+    default: 'deps/build_shim.sh'
+  stage-dir:
+    description: 'Where to copy built native library'
+    required: false
+    default: 'deps/lib'
+  lib-ext:
+    description: 'Native library extension (so|dylib|dll)'
+    required: true
+  run-precompile:
+    description: 'Run Pkg.precompile() (true|false)'
+    required: false
+    default: 'false'
+  run-tests:
+    description: 'Run Pkg.test() (true|false)'
+    required: false
+    default: 'true'
+  package-asset:
+    description: 'Create tar.gz and upload as artifact (true|false)'
+    required: false
+    default: 'false'
+  asset-name:
+    description: 'Base name for the tar.gz (without extension)'
+    required: false
+    default: ''
+  artifact-name:
+    description: 'Artifact name (defaults to asset-name)'
+    required: false
+    default: ''
+
+outputs:
+  libs3-path:
+    description: 'Resolved path to built libs3_jl_shim.*'
+    value: ${{ steps.stage.outputs.libs3_path }}
+  asset-path:
+    description: 'Path to generated tar.gz (if package-asset=true)'
+    value: ${{ steps.package.outputs.asset_path }}
+
+runs:
+  using: composite
+  steps:
+    - uses: julia-actions/setup-julia@v2
+      with:
+        version: ${{ inputs.julia-version }}
+        arch: ${{ inputs.julia-arch }}
+
+    - uses: julia-actions/cache@v2
+
+    - name: Instantiate Julia dependencies (without precompile)
+      shell: bash
+      env:
+        JULIA_PKG_PRECOMPILE_AUTO: 0
+      run: julia --project="${{ inputs.project-dir }}" -e 'using Pkg; Pkg.instantiate()'
+
+    - name: Build native wrapper (bash script)
+      shell: bash
+      run: |
+        set -euo pipefail
+        bash "${{ inputs.build-script }}"
+
+    - name: Stage native library for Julia
+      id: stage
+      shell: bash
+      env:
+        LIB_EXT: ${{ inputs.lib-ext }}
+      run: |
+        set -euo pipefail
+        
+        libpath="${{ inputs.stage-dir }}/libs3_jl_shim.${LIB_EXT}"
+        if [[ ! -f "$libpath" ]]; then
+          echo "ERROR: libs3_jl_shim.${LIB_EXT} not found at $libpath"
+          find "${{ inputs.stage-dir }}" -maxdepth 3 -type f -print
+          exit 1
+        fi
+        
+        echo "libs3_path=$libpath" >> "$GITHUB_OUTPUT"
+
+    - name: Precompile project
+      if: ${{ inputs.run-precompile == 'true' }}
+      shell: bash
+      run: julia --project="${{ inputs.project-dir }}" -e 'using Pkg; Pkg.precompile()'
+
+    - name: Run tests
+      if: ${{ inputs.run-tests == 'true' }}
+      shell: bash
+      run: julia --project="${{ inputs.project-dir }}" -e 'using Pkg; Pkg.test()'
+
+    - name: Package asset
+      id: package
+      if: ${{ inputs.package-asset == 'true' }}
+      shell: bash
+      run: |
+        set -euo pipefail
+        if [[ -z "${{ inputs.asset-name }}" ]]; then
+          echo "ERROR: asset-name is required when package-asset=true"
+          exit 1
+        fi
+        asset="${{ inputs.asset-name }}.tar.gz"
+        mkdir -p dist
+        cp "${{ steps.stage.outputs.libs3_path }}" dist/
+        tar -czf "$asset" -C dist .
+        echo "asset_path=$asset" >> "$GITHUB_OUTPUT"
+
+    - uses: actions/upload-artifact@v4
+      if: ${{ inputs.package-asset == 'true' }}
+      with:
+        name: ${{ inputs.artifact-name != '' && inputs.artifact-name || inputs.asset-name }}
+        path: ${{ steps.package.outputs.asset_path }}

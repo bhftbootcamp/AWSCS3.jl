@@ -1,0 +1,40 @@
+* text=auto eol=lf
+
+*.jl text
+*.md text
+*.toml text
+*.yml text
+*.yaml text
+*.json text
+*.sh text
+*.txt text
+*.rst text
+*.ini text
+*.cfg text
+*.conf text
+*.c text
+*.h text
+*.mk text
+Makefile text
+
+*.c linguist-language=C
+*.h linguist-language=C
+deps/** linguist-vendored=false linguist-generated=false linguist-detectable=true
+
+*.png binary
+*.jpg binary
+*.jpeg binary
+*.gif binary
+*.pdf binary
+*.zip binary
+*.gz binary
+*.bz2 binary
+*.xz binary
+*.7z binary
+*.tar binary
+*.so binary
+*.dylib binary
+*.dll binary
+*.a binary
+*.o binary
+*.wasm binary
