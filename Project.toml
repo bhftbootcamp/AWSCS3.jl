@@ -1,6 +1,6 @@
 name = "AWSCS3"
 uuid = "91c4a10d-04bc-465a-a8a6-624421680590"
-version = "1.0.0"
+version = "1.0.1"
 
 [deps]
 Base64 = "2a0f44e3-6c83-55bd-87e4-b1978d98bd5f"
@@ -25,4 +25,14 @@ Test = "8dfed614-e22c-5e08-85e1-65c5234f0b40"
 test = ["Test"]
 
 [compat]
+aws_c_auth_jll = "0.9.5"
+aws_c_cal_jll = "0.9.13"
+aws_c_common_jll = "0.12.6"
+aws_c_compression_jll = "0.3.2"
+aws_c_http_jll = "0.10.10"
+aws_c_io_jll = "0.26.1"
+aws_c_s3_jll = "0.11.5"
+aws_c_sdkutils_jll = "0.2.4"
+aws_checksums_jll = "0.2.8"
+s2n_tls_jll = "1.7"
 julia = "1.10"
